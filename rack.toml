@@ -9,3 +9,7 @@ repository = "https://github.com/rgc-lang/rack"
 description = "RGC package manager (mini cargo)"
 authors = ["bluemoon"]
 keywords = ["package-manager", "rgc", "cargo"]
+
+[build]
+prebuild = "bash tools/platform-shim.sh"
+link-args-file = "target/platform-shim/link-args"

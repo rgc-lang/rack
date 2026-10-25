@@ -249,11 +249,15 @@ $HOME/.rack/registry/<name>/<version>/
 
 ## Install
 
-Download `rack-0.4.0-<target>.tar.gz` (`.zip` on Windows) from the
+Download `rack-0.4.0-<target>.tar.gz` from the
 [releases](https://github.com/rgc-lang/rack/releases) page and put `rack` on
 `PATH`. rack drives a released [RGC](https://github.com/rgc-lang/rgc) compiler,
 found as `rgc` on `PATH` or through `RGC=<path>`; linking generated code needs a
-C++ toolchain (`g++`/`clang++`, or MSVC on Windows).
+C++ toolchain (`g++`/`clang++`).
+
+Windows is not supported yet: the RGC standard library still calls POSIX-only
+libc entry points, so `rack.exe` cannot link until those gain Windows
+implementations.
 
 ## Self-hosting
 

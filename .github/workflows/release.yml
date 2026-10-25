@@ -1,13 +1,16 @@
-# Build rack for six targets with the released RGC toolchain.
+# Build rack for the supported targets with the released RGC toolchain.
 #
 # The `rgc-lang/rgc` release named by RGC_TAG supplies the compiler (binary plus
 # lib/). rack is self-hosted: the released compiler builds rack0, rack0 builds
 # rack1, and rack1 rebuilds rack2 from a clean tree; rack1 and rack2 must be
-# byte-identical. On Windows the two stages are compiled directly with rgc
-# (the build driver still needs POSIX shell helpers at runtime).
+# byte-identical.
+#
+# Windows is not built yet: the RGC standard library (net, event, bytes) still
+# calls POSIX-only libc entry points, so a rack.exe cannot link until those gain
+# Windows implementations.
 #
 # Assets:
-#   rack-<version>-<target>.tar.gz / .zip   rack binary, LICENSE, README
+#   rack-<version>-<target>.tar.gz   rack binary, LICENSE, README
 #   SHA256SUMS
 
 name: release
@@ -85,8 +88,6 @@ jobs:
               {"platform": "linux-arm64", "target": "aarch64-unknown-linux-gnu", "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "ext": "tar.gz"},
               {"platform": "macos-x64", "target": "x86_64-apple-darwin", "os": "macos", "arch": "x64", "runner": "macos-15-intel", "ext": "tar.gz"},
               {"platform": "macos-arm64", "target": "aarch64-apple-darwin", "os": "macos", "arch": "arm64", "runner": "macos-15", "ext": "tar.gz"},
-              {"platform": "windows-x64", "target": "x86_64-pc-windows-msvc", "os": "windows", "arch": "x64", "runner": "windows-latest", "ext": "zip"},
-              {"platform": "windows-arm64", "target": "aarch64-pc-windows-msvc", "os": "windows", "arch": "arm64", "runner": "windows-11-arm", "ext": "zip"},
           ]
           raw = os.environ["PLATFORMS"].strip()
           if raw == "all":
@@ -159,17 +160,10 @@ jobs:
             --pattern "$asset" --dir toolchain --clobber
           echo "RGC_ARCHIVE=$asset" >> "$GITHUB_ENV"
 
-      - name: Extract RGC compiler (Unix)
-        if: runner.os != 'Windows'
+      - name: Extract RGC compiler
         run: tar -xzf "toolchain/$RGC_ARCHIVE" -C toolchain
 
-      - name: Extract RGC compiler (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Expand-Archive -Path "toolchain/$env:RGC_ARCHIVE" -DestinationPath toolchain -Force
-
-      - name: Bootstrap and package (Unix)
-        if: runner.os != 'Windows'
+      - name: Bootstrap and package
         run: |
           set -euo pipefail
           export RGC="$PWD/toolchain/rgc"
@@ -180,69 +174,6 @@ jobs:
           cp LICENSE README.md staging/
           tar -czf "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz" \
             -C staging rack LICENSE README.md
-
-      - name: Bootstrap and package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $root = (Get-Location).Path
-          $arch = if ("${{ matrix.arch }}" -eq "arm64") { "arm64" } else { "x64" }
-
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -property installationPath
-          if (-not $vs) { throw "Visual Studio not found" }
-          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
-          cmd /c "`"$vcvars`" $arch >nul 2>&1 && set" | ForEach-Object {
-            $i = $_.IndexOf("=")
-            if ($i -gt 0) { Set-Item -Path ("env:" + $_.Substring(0, $i)) -Value $_.Substring($i + 1) }
-          }
-          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-            throw "cl.exe not found after vcvarsall $arch"
-          }
-
-          # rgc links through `g++`; translate that call to cl.exe with the static CRT.
-          $wrapDir = Join-Path $env:RUNNER_TEMP "rgc-link"
-          New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
-          @'
-          $obj = $null; $out = $null; $libs = @()
-          for ($i = 0; $i -lt $args.Count; $i++) {
-            $a = $args[$i]
-            if ($a -eq "-g" -or $a -eq "-lm" -or $a -eq "-lpthread" -or $a -eq "-fPIC") { continue }
-            if ($a -eq "-o") { $i++; $out = $args[$i]; continue }
-            if ($a -eq "-lws2_32") { $libs += "ws2_32.lib"; continue }
-            if ($null -eq $obj -and -not $a.StartsWith("-")) { $obj = $a; continue }
-            $libs += $a
-          }
-          if (-not $obj) { throw "g++ shim: no object file in: $args" }
-          if (-not $out) { throw "g++ shim: no -o <output> in: $args" }
-          & cl.exe /nologo /MT $obj /link ("/OUT:" + $out) @libs `
-            libcmt.lib libucrt.lib libvcruntime.lib legacy_stdio_definitions.lib
-          exit $LASTEXITCODE
-          '@ | Set-Content -Path (Join-Path $wrapDir "link.ps1") -Encoding ascii
-          "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0link.ps1`" %*`r`n" |
-            Set-Content -Path (Join-Path $wrapDir "g++.cmd") -Encoding ascii
-          $env:PATH = "$wrapDir;$env:PATH"
-
-          $seed = Join-Path $root "toolchain\rgc.exe"
-          if (-not (Test-Path $seed)) { throw "rgc.exe not found at $seed" }
-          New-Item -ItemType Directory -Force -Path "$root\.bootstrap" | Out-Null
-          & $seed src/main.rg -o "$root\.bootstrap\rack1.exe"
-          if ($LASTEXITCODE -ne 0) { throw "rack1 build failed" }
-          & "$root\.bootstrap\rack1.exe" src/main.rg -o "$root\.bootstrap\rack2.exe"
-          if ($LASTEXITCODE -ne 0) { throw "rack2 build failed" }
-          if ((Get-FileHash "$root\.bootstrap\rack1.exe").Hash -ne (Get-FileHash "$root\.bootstrap\rack2.exe").Hash) {
-            throw "rack1/rack2 mismatch"
-          }
-          $v = & "$root\.bootstrap\rack2.exe" --version
-          Write-Host "version: $v"
-          if ("$v" -notmatch 'rack 0\.4\.0') { throw "unexpected version output" }
-
-          New-Item -ItemType Directory -Force -Path staging, dist | Out-Null
-          Copy-Item "$root\.bootstrap\rack2.exe" staging/rack.exe
-          Copy-Item LICENSE, README.md staging/
-          Compress-Archive -Path staging/rack.exe, staging/LICENSE, staging/README.md `
-            -DestinationPath "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.zip" -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
