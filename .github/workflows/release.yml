@@ -1,0 +1,297 @@
+# Build rack for six targets with the released RGC toolchain.
+#
+# The `rgc-lang/rgc` release named by RGC_TAG supplies the compiler (binary plus
+# lib/). rack is self-hosted: the released compiler builds rack0, rack0 builds
+# rack1, and rack1 rebuilds rack2 from a clean tree; rack1 and rack2 must be
+# byte-identical. On Windows the two stages are compiled directly with rgc
+# (the build driver still needs POSIX shell helpers at runtime).
+#
+# Assets:
+#   rack-<version>-<target>.tar.gz / .zip   rack binary, LICENSE, README
+#   SHA256SUMS
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (e.g. v0.4.0); it must already exist
+        required: true
+      rgc_tag:
+        description: RGC toolchain release used to build rack
+        required: false
+        default: v0.0.2
+      platforms:
+        description: Comma-separated platforms, or all
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RGC_REPO: rgc-lang/rgc
+  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.2' }}
+
+jobs:
+  prepare:
+    name: prepare matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.matrix.outputs.version }}
+      tag: ${{ steps.matrix.outputs.tag }}
+      rgc_version: ${{ steps.matrix.outputs.rgc_version }}
+    steps:
+      - name: Resolve tag and platform matrix
+        id: matrix
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TAG: ${{ github.ref_name }}
+          RGC_TAG: ${{ env.RGC_TAG }}
+          PLATFORMS: ${{ inputs.platforms || 'all' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_TAG"
+          fi
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: tag must look like vX.Y.Z, got: $tag" >&2
+            exit 1
+          fi
+          if ! [[ "$RGC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: rgc_tag must look like vX.Y.Z, got: $RGC_TAG" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          rgc_version="${RGC_TAG#v}"
+          python3 - "$tag" "$version" "$rgc_version" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+          tag, version, rgc_version = sys.argv[1], sys.argv[2], sys.argv[3]
+          all_platforms = [
+              {"platform": "linux-x64", "target": "x86_64-unknown-linux-gnu", "os": "linux", "arch": "x64", "runner": "ubuntu-latest", "ext": "tar.gz"},
+              {"platform": "linux-arm64", "target": "aarch64-unknown-linux-gnu", "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "ext": "tar.gz"},
+              {"platform": "macos-x64", "target": "x86_64-apple-darwin", "os": "macos", "arch": "x64", "runner": "macos-15-intel", "ext": "tar.gz"},
+              {"platform": "macos-arm64", "target": "aarch64-apple-darwin", "os": "macos", "arch": "arm64", "runner": "macos-15", "ext": "tar.gz"},
+              {"platform": "windows-x64", "target": "x86_64-pc-windows-msvc", "os": "windows", "arch": "x64", "runner": "windows-latest", "ext": "zip"},
+              {"platform": "windows-arm64", "target": "aarch64-pc-windows-msvc", "os": "windows", "arch": "arm64", "runner": "windows-11-arm", "ext": "zip"},
+          ]
+          raw = os.environ["PLATFORMS"].strip()
+          if raw == "all":
+              selected = all_platforms
+          else:
+              requested = [p.strip() for p in raw.split(",") if p.strip()]
+              known = {p["platform"] for p in all_platforms}
+              unknown = sorted(set(requested) - known)
+              if unknown:
+                  raise SystemExit("unknown platform(s): " + ", ".join(unknown))
+              selected = [p for p in all_platforms if p["platform"] in requested]
+          if not selected:
+              raise SystemExit("no platforms selected")
+          print("tag=" + tag)
+          print("version=" + version)
+          print("rgc_version=" + rgc_version)
+          print("matrix=" + json.dumps({"include": selected}, separators=(",", ":")))
+          PY
+
+  test:
+    name: test (linux-x64)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download RGC compiler
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p toolchain
+          gh release download "$RGC_TAG" --repo "$RGC_REPO" \
+            --pattern "rgc-${{ needs.prepare.outputs.rgc_version }}-x86_64-unknown-linux-gnu.tar.gz" \
+            --dir toolchain --clobber
+          tar -xzf toolchain/rgc-*.tar.gz -C toolchain
+          echo "RGC=$PWD/toolchain/rgc" >> "$GITHUB_ENV"
+
+      - name: Bootstrap and test
+        run: |
+          set -euo pipefail
+          ./tests/bootstrap.sh
+          RACK_BIN="$PWD/target/bin/rack" ./tests/test.sh
+
+  dist:
+    name: dist (${{ matrix.platform }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download RGC compiler
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p toolchain
+          asset="rgc-${{ needs.prepare.outputs.rgc_version }}-${{ matrix.target }}.${{ matrix.ext }}"
+          gh release download "$RGC_TAG" --repo "$RGC_REPO" \
+            --pattern "$asset" --dir toolchain --clobber
+          echo "RGC_ARCHIVE=$asset" >> "$GITHUB_ENV"
+
+      - name: Extract RGC compiler (Unix)
+        if: runner.os != 'Windows'
+        run: tar -xzf "toolchain/$RGC_ARCHIVE" -C toolchain
+
+      - name: Extract RGC compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -Path "toolchain/$env:RGC_ARCHIVE" -DestinationPath toolchain -Force
+
+      - name: Bootstrap and package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          export RGC="$PWD/toolchain/rgc"
+          ./tests/bootstrap.sh
+          "$PWD/target/bin/rack" --version
+          mkdir -p staging dist
+          cp target/bin/rack staging/rack
+          cp LICENSE README.md staging/
+          tar -czf "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz" \
+            -C staging rack LICENSE README.md
+
+      - name: Bootstrap and package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = (Get-Location).Path
+          $arch = if ("${{ matrix.arch }}" -eq "arm64") { "arm64" } else { "x64" }
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw "Visual Studio not found" }
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
+          cmd /c "`"$vcvars`" $arch >nul 2>&1 && set" | ForEach-Object {
+            $i = $_.IndexOf("=")
+            if ($i -gt 0) { Set-Item -Path ("env:" + $_.Substring(0, $i)) -Value $_.Substring($i + 1) }
+          }
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            throw "cl.exe not found after vcvarsall $arch"
+          }
+
+          # rgc links through `g++`; translate that call to cl.exe with the static CRT.
+          $wrapDir = Join-Path $env:RUNNER_TEMP "rgc-link"
+          New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
+          @'
+          $obj = $null; $out = $null; $libs = @()
+          for ($i = 0; $i -lt $args.Count; $i++) {
+            $a = $args[$i]
+            if ($a -eq "-g" -or $a -eq "-lm" -or $a -eq "-lpthread" -or $a -eq "-fPIC") { continue }
+            if ($a -eq "-o") { $i++; $out = $args[$i]; continue }
+            if ($a -eq "-lws2_32") { $libs += "ws2_32.lib"; continue }
+            if ($null -eq $obj -and -not $a.StartsWith("-")) { $obj = $a; continue }
+            $libs += $a
+          }
+          if (-not $obj) { throw "g++ shim: no object file in: $args" }
+          if (-not $out) { throw "g++ shim: no -o <output> in: $args" }
+          & cl.exe /nologo /MT $obj /link ("/OUT:" + $out) @libs `
+            libcmt.lib libucrt.lib libvcruntime.lib legacy_stdio_definitions.lib
+          exit $LASTEXITCODE
+          '@ | Set-Content -Path (Join-Path $wrapDir "link.ps1") -Encoding ascii
+          "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0link.ps1`" %*`r`n" |
+            Set-Content -Path (Join-Path $wrapDir "g++.cmd") -Encoding ascii
+          $env:PATH = "$wrapDir;$env:PATH"
+
+          $seed = Join-Path $root "toolchain\rgc.exe"
+          if (-not (Test-Path $seed)) { throw "rgc.exe not found at $seed" }
+          New-Item -ItemType Directory -Force -Path "$root\.bootstrap" | Out-Null
+          & $seed src/main.rg -o "$root\.bootstrap\rack1.exe"
+          if ($LASTEXITCODE -ne 0) { throw "rack1 build failed" }
+          & "$root\.bootstrap\rack1.exe" src/main.rg -o "$root\.bootstrap\rack2.exe"
+          if ($LASTEXITCODE -ne 0) { throw "rack2 build failed" }
+          if ((Get-FileHash "$root\.bootstrap\rack1.exe").Hash -ne (Get-FileHash "$root\.bootstrap\rack2.exe").Hash) {
+            throw "rack1/rack2 mismatch"
+          }
+          $v = & "$root\.bootstrap\rack2.exe" --version
+          Write-Host "version: $v"
+          if ("$v" -notmatch 'rack 0\.4\.0') { throw "unexpected version output" }
+
+          New-Item -ItemType Directory -Force -Path staging, dist | Out-Null
+          Copy-Item "$root\.bootstrap\rack2.exe" staging/rack.exe
+          Copy-Item LICENSE, README.md staging/
+          Compress-Archive -Path staging/rack.exe, staging/LICENSE, staging/README.md `
+            -DestinationPath "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.zip" -Force
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [prepare, test, dist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "rack $VERSION" \
+              --generate-notes
+          fi
+
+      - name: Generate and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob
+          files=(rack-*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "error: no release assets" >&2
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" "${files[@]}" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber

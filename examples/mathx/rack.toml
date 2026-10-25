@@ -1,0 +1,9 @@
+# mathx package manifest (stored in the registry with mathx.rg at publish time)
+
+[package]
+name = "mathx"
+version = "0.2.0"
+entry = "mathx.rg"
+description = "fib and other small math utilities"
+authors = ["bluemoon"]
+keywords = ["math", "fibonacci"]

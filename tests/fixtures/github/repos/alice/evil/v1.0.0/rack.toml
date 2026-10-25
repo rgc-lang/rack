@@ -1,0 +1,5 @@
+[package]
+name = "evilx"
+version = "1.0.0"
+entry = "evil.rg"
+description = "manifest name does not match repository name"

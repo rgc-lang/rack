@@ -1,0 +1,11 @@
+# rack manages itself with rack — the bootstrap entry point
+
+[package]
+name = "rack"
+version = "0.4.0"
+entry = "src/main.rg"
+license = "Apache-2.0"
+repository = "https://github.com/rgc-lang/rack"
+description = "RGC package manager (mini cargo)"
+authors = ["bluemoon"]
+keywords = ["package-manager", "rgc", "cargo"]

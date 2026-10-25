@@ -1,0 +1,12 @@
+# calcx — test GitHub-hosted package; the tag has no v prefix
+# depends on mathx under the same owner (GitHub-source transitive dependency)
+
+[package]
+name = "calcx"
+version = "0.3.0"
+entry = "calcx.rg"
+description = "remote calc example"
+
+[dependencies.mathx]
+version = "0.2.0"
+git = "github.com/alice/mathx"

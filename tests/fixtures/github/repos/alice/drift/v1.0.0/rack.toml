@@ -1,0 +1,5 @@
+[package]
+name = "drift"
+version = "1.0.0"
+entry = "drift.rg"
+description = "tag drift fixture"

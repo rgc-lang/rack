@@ -1,0 +1,5 @@
+[package]
+name = "many"
+version = "0.1.0"
+entry = "many.rg"
+description = "pagination fixture"

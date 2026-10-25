@@ -1,0 +1,7 @@
+# mathx — test GitHub-hosted package (v0.2.0)
+
+[package]
+name = "mathx"
+version = "0.2.0"
+entry = "mathx.rg"
+description = "remote math helpers"

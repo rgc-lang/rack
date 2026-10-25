@@ -1,0 +1,9 @@
+# rack.pkg — mathx package manifest (used when publishing)
+# Publish: rack publish (requires mathx.rg at the project root)
+
+[package]
+name = mathx
+version = 0.2.0
+entry = mathx.rg
+
+[deps]

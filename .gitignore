@@ -1,0 +1,9 @@
+# Build artifacts
+target/
+build/
+*.o
+*.out
+# Bootstrap/package outputs
+.bootstrap/
+dist/
+__pycache__/

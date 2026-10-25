@@ -1,0 +1,20 @@
+[
+  {
+    "full_name": "alice/mathx",
+    "description": "remote math helpers",
+    "stargazers_count": 42,
+    "html_url": "https://github.com/alice/mathx"
+  },
+  {
+    "full_name": "alice/calcx",
+    "description": "calc example using mathx",
+    "stargazers_count": 7,
+    "html_url": "https://github.com/alice/calcx"
+  },
+  {
+    "full_name": "bob/textx",
+    "description": "string helpers",
+    "stargazers_count": 3,
+    "html_url": "https://github.com/bob/textx"
+  }
+]
