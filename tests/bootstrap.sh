@@ -31,18 +31,20 @@ if [ -z "$RGC_BIN" ]; then
         RGC_BIN="$(command -v "rgc$EXE" || command -v rgc || true)"
     fi
 fi
-if [ -z "$RGC_BIN" ] || [ ! -x "$RGC_BIN" ]; then
+
+# RGC may arrive in either spelling: bash needs a POSIX path for its own checks
+# and direct execution, while rack builds through cmd.exe and needs a Windows
+# path. cygpath translates between the two; without it, pass the value through.
+RGC_RUN="$RGC_BIN"
+RGC_FOR_BUILD="$RGC_BIN"
+if [ -n "$EXE" ] && command -v cygpath >/dev/null 2>&1; then
+    RGC_RUN="$(cygpath -u "$RGC_BIN")"
+    RGC_FOR_BUILD="$(cygpath -w "$RGC_BIN")"
+fi
+if [ -z "$RGC_RUN" ] || [ ! -x "$RGC_RUN" ]; then
     echo "error: no RGC compiler found"
     echo "hint: install an RGC release and put rgc on PATH, or set RGC=<path>"
     exit 1
-fi
-
-# rack builds through cmd.exe on Windows, which needs a Windows path; bash itself
-# is happiest with the POSIX spelling. cygpath translates between the two.
-RGC_RUN="$RGC_BIN"
-if [ -n "$EXE" ] && command -v cygpath >/dev/null 2>&1; then
-    RGC_RUN="$(cygpath -u "$RGC_BIN")"
-    RGC_BIN="$(cygpath -w "$RGC_BIN")"
 fi
 
 WORK="$(mktemp -d)"
@@ -64,13 +66,13 @@ fi
 # stages 1/2 verify the determinism of rack's build pipeline: two generations of rack
 # build the same source with the same host compiler; the artifacts must be byte-identical.
 echo "== stage 1: rack0 build (rack manages itself)"
-RGC="$RGC_BIN" "$WORK/rack0$EXE" build
+RGC="$RGC_FOR_BUILD" "$WORK/rack0$EXE" build
 cp "target/bin/rack$EXE" "$WORK/rack1$EXE"
 
 echo "== stage 2: rack1 build (clean tree)"
 rm -f "target/bin/rack$EXE"
 rm -rf target/build
-RGC="$RGC_BIN" "$WORK/rack1$EXE" build
+RGC="$RGC_FOR_BUILD" "$WORK/rack1$EXE" build
 cp "target/bin/rack$EXE" "$WORK/rack2$EXE"
 
 echo "== stage 3: fixed-point check"
