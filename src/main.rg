@@ -19,7 +19,7 @@ def main() -> int {
         return cmd_help()
     }
     if cmd == "--version" or cmd == "version" {
-        print("rack 0.4.2 (RGC)")
+        print("rack 0.4.3 (RGC)")
         return 0
     }
     if cmd == "new" {
