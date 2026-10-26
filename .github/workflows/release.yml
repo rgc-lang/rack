@@ -201,7 +201,7 @@ jobs:
           $wrapDir = Join-Path $env:RUNNER_TEMP "rgc-link"
           New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
           @'
-          $obj = $null; $out = $null; $libs = @(); $linkFlags = @("/Brepro")
+          $obj = $null; $out = $null; $libs = @(); $linkFlags = @("/Brepro", "/STACK:16777216")
           for ($i = 0; $i -lt $args.Count; $i++) {
             $a = $args[$i]
             if ($a -eq "-g" -or $a -eq "-lm" -or $a -eq "-lpthread" -or $a -eq "-fPIC") { continue }
