@@ -264,8 +264,9 @@ uses the same package, build and test paths as the Unix builds.
 Windows also publishes `rgc-<rgc-version>-windows-<arch>.exe`, an installer that
 puts `rack`, `rgc` and the standard library under *Program Files*, adds them to
 the system `PATH`, and registers an uninstaller that removes the `PATH` entry it
-added. On the other platforms, `rack self uninstall --yes` removes the toolchains
-installed by `install.sh`.
+added. On the other platforms, `RGC_HOME=<root> rack self uninstall --yes`
+removes the toolchains under that root — pass `RGC_HOME` when it was set at
+install time, because rack otherwise defaults to `~/.rgc`.
 
 ## Self-hosting
 
