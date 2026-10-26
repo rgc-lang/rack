@@ -249,7 +249,7 @@ $HOME/.rack/registry/<name>/<version>/
 
 ## Install
 
-Download `rack-0.4.1-<target>.tar.gz` from the
+Download `rack-0.4.2-<target>.tar.gz` from the
 [releases](https://github.com/rgc-lang/rack/releases) page and put `rack` (or
 `rack.exe` on Windows) on `PATH`. rack drives a released
 [RGC](https://github.com/rgc-lang/rgc) compiler, found as `rgc` on `PATH` or
