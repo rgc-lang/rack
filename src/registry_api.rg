@@ -3,6 +3,9 @@ import json
 import os
 import toml
 import util
+import bytes
+import gzip
+import tar
 
 # registry_api.rg — web registry publish client (RGC-REGISTRY §8)
 #
@@ -81,10 +84,11 @@ public def reg_save_token(token: str) -> Result[None, str] {
     return Result[None, str].Ok(None)
 }
 
-# POST /api/v1/packages/new with the module as UTF-8 text (no base64/multipart).
+# PUT /api/v1/packages/new：单文件上传 module（UTF-8 文本），
+# 多文件包额外携带 archive（base64 编码的 tar.gz 源码树）。
 public def reg_publish(name: str, version: str, module: str, manifest: str,
                       description: str, homepage: str, repository: str,
-                      keywords: List[str]) -> RegResult {
+                      keywords: List[str], archive_base64: str) -> RegResult {
     out = new_reg_result()
     token = reg_token()
     if token.len() == 0 {
@@ -112,7 +116,11 @@ public def reg_publish(name: str, version: str, module: str, manifest: str,
         }
         json.set(@obj, "keywords", arr)
     }
-    json.set(@obj, "module", json.str_value(module))
+    if archive_base64.len() > 0 {
+        json.set(@obj, "archive", json.str_value(archive_base64))
+    } else {
+        json.set(@obj, "module", json.str_value(module))
+    }
     json.set(@obj, "manifest", json.str_value(manifest))
     body = json.stringify(@obj)
 
@@ -132,6 +140,125 @@ public def reg_publish(name: str, version: str, module: str, manifest: str,
         return out
     }
     out.error = reg_error_message(r.response.status, r.response.body)
+    return out
+}
+
+# ---- 多文件包：把项目目录打成 tar.gz 并 base64 ----
+
+# 打包结果：与 TarResult/GzipResult 同风格（类承载 ok/error/data）。
+public class RegArchiveResult {
+    ok: bool
+    error: str
+    data: Bytes
+}
+
+def new_reg_archive() -> RegArchiveResult {
+    r = RegArchiveResult()
+    r.ok = False
+    r.error = ""
+    r.data = bytes.bytes_new(0)
+    return r
+}
+
+# 顶层目录黑名单：这些目录不进发布归档（与 cargo package 的排除规则一致）。
+def reg_skip_dir(name: str) -> bool {
+    if name == "target" or name == ".git" or name == ".rack" or name == "node_modules" {
+        return True
+    }
+    if name == ".docusaurus" or name == ".cache" or name == ".DS_Store" {
+        return True
+    }
+    return False
+}
+
+# 递归添加目录内容到 tar；`rel` 以 `/` 分隔（tar 规范路径）。
+def reg_add_dir_entries(b: @var TarBuilder, root: str, dir: str, depth: int) -> str {
+    names = util.list_dir(dir)
+    for name in names {
+        if depth == 0 and reg_skip_dir(name) {
+            continue
+        }
+        full = util.path_join(dir, name)
+        rel = full.slice(root.len() + 1, full.len())
+        if util.is_dir_path(full) {
+            b.add_dir(rel)
+            err = reg_add_dir_entries(@b, root, full, depth + 1)
+            if err.len() > 0 {
+                return err
+            }
+        } else {
+            r = bytes.read_bytes(full)
+            if not r.ok {
+                return "cannot read " + full + ": " + r.error
+            }
+            d = r.data
+            b.add_file(rel, @d)
+        }
+    }
+    return ""
+}
+
+# 打包项目目录：根目录 rack.toml + 全部源码/构建文件（排除 target/.git 等）。
+public def reg_build_archive(proj_dir: str) -> RegArchiveResult {
+    out = new_reg_archive()
+    mt = util.read_file_or(util.path_join(proj_dir, "rack.toml"))
+    if mt.len() == 0 {
+        out.error = "no rack.toml in " + proj_dir
+        return out
+    }
+    b = tar.builder()
+    b.add_file("rack.toml", bytes.bytes_from_str(mt))
+    err = reg_add_dir_entries(@b, proj_dir, proj_dir, 0)
+    if err.len() > 0 {
+        out.error = err
+        return out
+    }
+    t = b.finish()
+    if not t.ok {
+        out.error = t.error
+        return out
+    }
+    td = t.data
+    gz = gzip.compress(@td)
+    if not gz.ok {
+        out.error = gz.error
+        return out
+    }
+    out.ok = True
+    out.data = gz.data
+    return out
+}
+
+# 对二进制字节做 base64（RGC stdlib 只公开了解码；编码逻辑与 http.rg 内部实现一致）。
+public def reg_b64_encode_bytes(b: @Bytes) -> str {
+    table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    out = ""
+    n = b.len
+    i = 0
+    while i + 2 < n {
+        b0 = b.get(i)
+        b1 = b.get(i + 1)
+        b2 = b.get(i + 2)
+        out = out + chr(table.char_at(b0 / 4))
+        out = out + chr(table.char_at((b0 % 4) * 16 + b1 / 16))
+        out = out + chr(table.char_at((b1 % 16) * 4 + b2 / 64))
+        out = out + chr(table.char_at(b2 % 64))
+        i = i + 3
+    }
+    left = n - i
+    if left == 1 {
+        b0 = b.get(i)
+        out = out + chr(table.char_at(b0 / 4))
+        out = out + chr(table.char_at((b0 % 4) * 16))
+        out = out + "=="
+    } elif left == 2 {
+        b0 = b.get(i)
+        b1 = b.get(i + 1)
+        out = out + chr(table.char_at(b0 / 4))
+        out = out + chr(table.char_at((b0 % 4) * 16 + b1 / 16))
+        out = out + chr(table.char_at((b1 % 16) * 4))
+        out = out + "="
+    }
     return out
 }
 

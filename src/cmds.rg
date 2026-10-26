@@ -8,6 +8,7 @@ import resolve
 import testrun
 import time
 import util
+import bytes
 
 # cmds.rg — rack subcommand implementations
 
@@ -646,25 +647,48 @@ public def cmd_publish(proj_dir: str) -> int {
         print("  set `repository = \"https://github.com/<owner>/<repo>\"` (or `github.com/<owner>/<repo>`)")
         return 1
     }
-    # Scoped package names (`scope/name`) map to the `<name>.rg` file at the project root.
-    module_name = m.name
-    slash = find_char_last(m.name, "/")
-    if slash >= 0 {
-        module_name = m.name.slice(slash + 1, m.name.len())
-    }
-    src = path_join(proj_dir, module_name + ".rg")
-    r = read_file(src)
-    if r.is_err() {
-        print("error: no module file `" + src + "` in project root")
-        return 1
-    }
-    manifest_text = read_file_or(path_join(proj_dir, "rack.toml"))
+    manifest_text = util.read_file_or(util.path_join(proj_dir, "rack.toml"))
     if manifest_text.len() == 0 {
         print("error: no rack.toml in " + proj_dir)
         return 1
     }
-    res = reg_publish(m.name, m.version, r.unwrap(), manifest_text,
-                    m.description, m.homepage, m.repository, m.keywords)
+
+    # 多文件包：把整个项目源码树打成 tar.gz 上传（rack 本身也是多文件包）。
+    # 若打包失败（例如没有可读文件），回退旧的单 `.rg` 文件发布。
+    archive_b64 = ""
+    module_text = ""
+    ar = reg_build_archive(proj_dir)
+    if ar.ok {
+        d = ar.data
+        # 调试/审计钩子：设 RACK_PUBLISH_DEBUG_ARCHIVE 时把待上传归档写到本地。
+        debug_out = util.env_or("RACK_PUBLISH_DEBUG_ARCHIVE", "")
+        if debug_out.len() > 0 {
+            w = bytes.write_bytes(debug_out, @d)
+            if not w.ok {
+                print("warning: cannot write debug archive: " + w.error)
+            } else {
+                print("debug: wrote publish archive to " + debug_out)
+            }
+        }
+        archive_b64 = reg_b64_encode_bytes(@d)
+    } else {
+        module_name = m.name
+        slash = find_char_last(m.name, "/")
+        if slash >= 0 {
+            module_name = m.name.slice(slash + 1, m.name.len())
+        }
+        src = util.path_join(proj_dir, module_name + ".rg")
+        r = util.try_read(src)
+        if r.is_err() {
+            print("error: cannot package project: " + ar.error)
+            print("error: no module file `" + src + "` in project root")
+            return 1
+        }
+        module_text = r.unwrap()
+    }
+
+    res = reg_publish(m.name, m.version, module_text, manifest_text,
+                    m.description, m.homepage, m.repository, m.keywords, archive_b64)
     if not res.ok {
         print("error: " + res.error)
         return 1
