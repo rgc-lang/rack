@@ -149,7 +149,8 @@ def compiler_stamp(proj_dir: str, compiler: str) -> str {
                 cpath = lines.get(0)
             }
         }
-        sh("cmd /C for %I in (" + shell_quote(win_path(cpath)) + ") do @echo %~zI %~tI > " +
+        # sh() runs this line from a generated .bat, so for-variables need %%.
+        sh("cmd /C for %%I in (" + shell_quote(win_path(cpath)) + ") do @echo %%~zI %%~tI > " +
             shell_quote(win_path(tmp)) + " 2>NUL")
     } else {
         if find_char(cpath, "/") < 0 {

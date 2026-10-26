@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to release (e.g. v0.4.1); it must already exist
+        description: Tag to release (e.g. v0.4.2); it must already exist
         required: true
       rgc_tag:
         description: RGC toolchain release used to build rack
@@ -238,8 +238,13 @@ jobs:
 
           # End-to-end smoke test: scaffold, build, link and run a fresh project.
           SMOKE="$(mktemp -d)"
-          ( cd "$SMOKE" && "$RACK" new smoke && cd smoke && "$RACK" run > run.out )
+          ( cd "$SMOKE" && "$RACK" new smoke && cd smoke && "$RACK" run > run.out 2> run.err )
           grep -q "hello from smoke" "$SMOKE/smoke/run.out"
+          if grep -Eq "batch-parameter|syntax of the command is incorrect" "$SMOKE/smoke/run.err"; then
+            echo "error: shell noise while building on Windows:" >&2
+            cat "$SMOKE/smoke/run.err" >&2
+            exit 1
+          fi
 
           mkdir -p staging dist
           cp "target/bin/rack$EXE" "staging/rack$EXE"
