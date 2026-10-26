@@ -32,10 +32,17 @@ export HOME="$WORK/home"
 mkdir -p "$HOME"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "== stage 0: $RGC_BIN compiles rack0 (temp directory)"
-"$RGC_BIN" "$REPO/src/main.rg" -o "$WORK/rack0" >/dev/null
-
 cd "$REPO"
+bash tools/platform-shim.sh
+
+echo "== stage 0: $RGC_BIN compiles rack0 (temp directory)"
+if [ -s target/platform-shim/link-args ]; then
+    "$RGC_BIN" "$REPO/src/main.rg" -o "$WORK/rack0" \
+        --link-args "$(cat target/platform-shim/link-args)" >/dev/null
+else
+    "$RGC_BIN" "$REPO/src/main.rg" -o "$WORK/rack0" >/dev/null
+fi
+
 # stages 1/2 verify the determinism of rack's build pipeline: two generations of rack
 # build the same source with the same host compiler; the artifacts must be byte-identical.
 echo "== stage 1: rack0 build (rack manages itself)"
