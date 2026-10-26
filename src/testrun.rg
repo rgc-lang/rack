@@ -290,6 +290,9 @@ def tr_show_diff(want: str, got: str) {
 
 # err_*.rg and err_*/main.rg: compilation must fail with an "error:" diagnostic.
 # Files in a "negative" directory are all negative cases regardless of name.
+# When a `<testfile>.code` file sits next to the test, it lists the exact
+# error codes that must appear (one per line, e.g. "E0601"); the log is
+# checked for each `error[<code>]`, guarding against error-code regressions.
 def tr_negative(r: @var TestRun, src: str, label: str) {
     log = r.tmp + "/neg.log"
     bin_path = r.tmp + "/neg_bin" + exe_suffix()
@@ -298,10 +301,25 @@ def tr_negative(r: @var TestRun, src: str, label: str) {
         r.fail_n = r.fail_n + 1
         return
     }
-    if not (tr_read(log).contains("error[") or tr_read(log).contains("error:")) {
+    content = tr_read(log)
+    if not (content.contains("error[") or content.contains("error:")) {
         print("FAIL " + label + " missing error: diagnostic")
         r.fail_n = r.fail_n + 1
         return
+    }
+    code_file = src + ".code"
+    if tr_exists(code_file) {
+        lines = tr_read_trim(code_file).split("\n")
+        i = 0
+        while i < lines.len() {
+            code = trim(lines.get(i))
+            if code.len() > 0 and not content.contains("error[" + code + "]") {
+                print("FAIL " + label + " missing expected error code " + code)
+                r.fail_n = r.fail_n + 1
+                return
+            }
+            i = i + 1
+        }
     }
     print("PASS " + label)
     r.pass_n = r.pass_n + 1
