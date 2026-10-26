@@ -249,15 +249,17 @@ $HOME/.rack/registry/<name>/<version>/
 
 ## Install
 
-Download `rack-0.4.0-<target>.tar.gz` from the
-[releases](https://github.com/rgc-lang/rack/releases) page and put `rack` on
-`PATH`. rack drives a released [RGC](https://github.com/rgc-lang/rgc) compiler,
-found as `rgc` on `PATH` or through `RGC=<path>`; linking generated code needs a
-C++ toolchain (`g++`/`clang++`).
+Download `rack-0.4.1-<target>.tar.gz` from the
+[releases](https://github.com/rgc-lang/rack/releases) page and put `rack` (or
+`rack.exe` on Windows) on `PATH`. rack drives a released
+[RGC](https://github.com/rgc-lang/rgc) compiler, found as `rgc` on `PATH` or
+through `RGC=<path>`; linking generated code needs a C++ toolchain — `g++` /
+`clang++` on Linux and macOS, and a `g++`-compatible driver (MinGW-w64, or the
+MSYS2 `CLANGARM64` toolchain on Windows ARM64) on Windows.
 
-Windows is not supported yet: the RGC standard library still calls POSIX-only
-libc entry points, so `rack.exe` cannot link until those gain Windows
-implementations.
+Windows x64 and arm64 are supported: rgc supplies the POSIX runtime the standard
+library needs on top of Winsock, Win32 threads and the MSVC CRT, so `rack.exe`
+uses the same package, build and test paths as the Unix builds.
 
 ## Self-hosting
 
@@ -331,7 +333,7 @@ checksums", without a central index.
 | Error handling | `Result[T, str]` + `match`; parse failures are never silent |
 | `Manifest`/`TomlDoc` editing | `@var` mutable borrows rewrite fields across functions |
 | `$HOME` / `pwd` / directory listing | `os.getenv("HOME")`; directory listing still uses a shell bypass that writes a fixed temp file and reads it back |
-| sha256 integrity | `sha256sum` (shell bypass), recorded at publish/first fetch and verified at install |
+| sha256 integrity | shell `sha256sum` on Unix, pure-RGC sha2 on Windows (no shell dependency); recorded at publish/first fetch and verified at install |
 
 Module layout (`rack/src/`):
 `main` (dispatch) → `cmds` (commands) → `resolve` (closure resolution/conflicts/cycles/dependency tree),

@@ -5,9 +5,10 @@
 # rack1, and rack1 rebuilds rack2 from a clean tree; rack1 and rack2 must be
 # byte-identical.
 #
-# Windows is not built yet: the RGC standard library (net, event, bytes) still
-# calls POSIX-only libc entry points, so a rack.exe cannot link until those gain
-# Windows implementations.
+# Windows builds use the MSVC toolchain: rgc links by invoking g++, so the job
+# installs a g++.cmd wrapper that translates the link line to cl.exe with the
+# static CRT, ws2_32 and bcrypt. /Brepro keeps the PE image deterministic so the
+# two bootstrap generations can be compared byte for byte.
 #
 # Assets:
 #   rack-<version>-<target>.tar.gz   rack binary, LICENSE, README
@@ -22,12 +23,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to release (e.g. v0.4.0); it must already exist
+        description: Tag to release (e.g. v0.4.1); it must already exist
         required: true
       rgc_tag:
         description: RGC toolchain release used to build rack
         required: false
-        default: v0.0.2
+        default: v0.0.3
       platforms:
         description: Comma-separated platforms, or all
         required: false
@@ -42,7 +43,7 @@ concurrency:
 
 env:
   RGC_REPO: rgc-lang/rgc
-  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.2' }}
+  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.3' }}
 
 jobs:
   prepare:
@@ -88,6 +89,8 @@ jobs:
               {"platform": "linux-arm64", "target": "aarch64-unknown-linux-gnu", "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "ext": "tar.gz"},
               {"platform": "macos-x64", "target": "x86_64-apple-darwin", "os": "macos", "arch": "x64", "runner": "macos-15-intel", "ext": "tar.gz"},
               {"platform": "macos-arm64", "target": "aarch64-apple-darwin", "os": "macos", "arch": "arm64", "runner": "macos-15", "ext": "tar.gz"},
+              {"platform": "windows-x64", "target": "x86_64-pc-windows-msvc", "os": "windows", "arch": "x64", "runner": "windows-latest", "ext": "zip"},
+              {"platform": "windows-arm64", "target": "aarch64-pc-windows-msvc", "os": "windows", "arch": "arm64", "runner": "windows-11-arm", "ext": "zip"},
           ]
           raw = os.environ["PLATFORMS"].strip()
           if raw == "all":
@@ -160,20 +163,84 @@ jobs:
             --pattern "$asset" --dir toolchain --clobber
           echo "RGC_ARCHIVE=$asset" >> "$GITHUB_ENV"
 
-      - name: Extract RGC compiler
+      - name: Extract RGC compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -Path "toolchain/$env:RGC_ARCHIVE" -DestinationPath toolchain -Force
+
+      - name: Extract RGC compiler (Unix)
+        if: runner.os != 'Windows'
         run: tar -xzf "toolchain/$RGC_ARCHIVE" -C toolchain
+
+      - name: Set up the MSVC linker shim (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $arch = if ("${{ matrix.arch }}" -eq "arm64") { "arm64" } else { "x64" }
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          if (-not $vs) { throw "Visual Studio not found" }
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
+          cmd /c "`"$vcvars`" $arch >nul 2>&1 && set" | ForEach-Object {
+            $i = $_.IndexOf("=")
+            if ($i -gt 0) { Set-Item -Path ("env:" + $_.Substring(0, $i)) -Value $_.Substring($i + 1) }
+          }
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            throw "cl.exe not found after vcvarsall $arch"
+          }
+
+          # rgc links by invoking `g++ <obj> -o <out> -lws2_32 -lbcrypt`; translate
+          # that to cl.exe with the static CRT and a reproducible PE timestamp.
+          $wrapDir = Join-Path $env:RUNNER_TEMP "rgc-link"
+          New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
+          @'
+          $obj = $null; $out = $null; $libs = @(); $linkFlags = @("/Brepro")
+          for ($i = 0; $i -lt $args.Count; $i++) {
+            $a = $args[$i]
+            if ($a -eq "-g" -or $a -eq "-lm" -or $a -eq "-lpthread" -or $a -eq "-fPIC") { continue }
+            if ($a -eq "-o") { $i++; $out = $args[$i]; continue }
+            if ($a -eq "-lws2_32") { $libs += "ws2_32.lib"; continue }
+            if ($a -eq "-lbcrypt") { $libs += "bcrypt.lib"; continue }
+            if ($a -eq "-shared") { $linkFlags += "/DLL"; continue }
+            if ($null -eq $obj -and -not $a.StartsWith("-")) { $obj = $a; continue }
+            $libs += $a
+          }
+          & cl.exe /nologo /MT $obj /link @linkFlags ("/OUT:" + $out) @libs `
+            ws2_32.lib bcrypt.lib `
+            libcmt.lib libucrt.lib libvcruntime.lib legacy_stdio_definitions.lib
+          exit $LASTEXITCODE
+          '@ | Set-Content -Path (Join-Path $wrapDir "link.ps1") -Encoding ascii
+          "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0link.ps1`" %*`r`n" |
+            Set-Content -Path (Join-Path $wrapDir "g++.cmd") -Encoding ascii
+          "RGC_LINK_SHIM=$wrapDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Bootstrap and package
         run: |
           set -euo pipefail
-          export RGC="$PWD/toolchain/rgc"
+          EXE=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            EXE=".exe"
+            export PATH="$(cygpath -u "$RGC_LINK_SHIM"):$PATH"
+            export RGC="$(cygpath -w "$PWD/toolchain/rgc.exe")"
+          else
+            export RGC="$PWD/toolchain/rgc"
+          fi
           ./tests/bootstrap.sh
-          "$PWD/target/bin/rack" --version
+          RACK="$PWD/target/bin/rack$EXE"
+          "$RACK" --version
+
+          # End-to-end smoke test: scaffold, build, link and run a fresh project.
+          SMOKE="$(mktemp -d)"
+          ( cd "$SMOKE" && "$RACK" new smoke && cd smoke && "$RACK" run > run.out )
+          grep -q "hello from smoke" "$SMOKE/smoke/run.out"
+
           mkdir -p staging dist
-          cp target/bin/rack staging/rack
+          cp "target/bin/rack$EXE" "staging/rack$EXE"
           cp LICENSE README.md staging/
           tar -czf "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz" \
-            -C staging rack LICENSE README.md
+            -C staging "rack$EXE" LICENSE README.md
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

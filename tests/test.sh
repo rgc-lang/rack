@@ -90,7 +90,7 @@ cd "$WORK"
 
 # ---------- basics ----------
 OUT="$($RACK --version)"
-check version "rack 0.4.0" "$OUT"
+check version "rack 0.4.1" "$OUT"
 
 # ---------- TOML quoted keys (namespace prerequisite) ----------
 OUT="$(RGC="$RGC_BIN" "$REPO/tests/toml_quoted_test.sh" 2>&1)"

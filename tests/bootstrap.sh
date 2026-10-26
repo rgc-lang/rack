@@ -13,18 +13,36 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
+# MSYS/Git Bash and GitHub's Windows runners report themselves through uname;
+# the OS variable also covers cmd/PowerShell invocations.
+EXE=""
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;;
+esac
+if [ "${OS:-}" = "Windows_NT" ]; then
+    EXE=".exe"
+fi
+
 RGC_BIN="${RGC:-}"
 if [ -z "$RGC_BIN" ]; then
-    if [ -x "$REPO/build/rgc" ]; then
-        RGC_BIN="$REPO/build/rgc"
+    if [ -x "$REPO/build/rgc$EXE" ]; then
+        RGC_BIN="$REPO/build/rgc$EXE"
     else
-        RGC_BIN="$(command -v rgc || true)"
+        RGC_BIN="$(command -v "rgc$EXE" || command -v rgc || true)"
     fi
 fi
 if [ -z "$RGC_BIN" ] || [ ! -x "$RGC_BIN" ]; then
     echo "error: no RGC compiler found"
     echo "hint: install an RGC release and put rgc on PATH, or set RGC=<path>"
     exit 1
+fi
+
+# rack builds through cmd.exe on Windows, which needs a Windows path; bash itself
+# is happiest with the POSIX spelling. cygpath translates between the two.
+RGC_RUN="$RGC_BIN"
+if [ -n "$EXE" ] && command -v cygpath >/dev/null 2>&1; then
+    RGC_RUN="$(cygpath -u "$RGC_BIN")"
+    RGC_BIN="$(cygpath -w "$RGC_BIN")"
 fi
 
 WORK="$(mktemp -d)"
@@ -35,32 +53,32 @@ trap 'rm -rf "$WORK"' EXIT
 cd "$REPO"
 bash tools/platform-shim.sh
 
-echo "== stage 0: $RGC_BIN compiles rack0 (temp directory)"
+echo "== stage 0: $RGC_RUN compiles rack0 (temp directory)"
 if [ -s target/platform-shim/link-args ]; then
-    "$RGC_BIN" "$REPO/src/main.rg" -o "$WORK/rack0" \
+    "$RGC_RUN" "$REPO/src/main.rg" -o "$WORK/rack0$EXE" \
         --link-args "$(cat target/platform-shim/link-args)" >/dev/null
 else
-    "$RGC_BIN" "$REPO/src/main.rg" -o "$WORK/rack0" >/dev/null
+    "$RGC_RUN" "$REPO/src/main.rg" -o "$WORK/rack0$EXE" >/dev/null
 fi
 
 # stages 1/2 verify the determinism of rack's build pipeline: two generations of rack
 # build the same source with the same host compiler; the artifacts must be byte-identical.
 echo "== stage 1: rack0 build (rack manages itself)"
-RGC="$RGC_BIN" "$WORK/rack0" build
-cp target/bin/rack "$WORK/rack1"
+RGC="$RGC_BIN" "$WORK/rack0$EXE" build
+cp "target/bin/rack$EXE" "$WORK/rack1$EXE"
 
 echo "== stage 2: rack1 build (clean tree)"
-rm -f target/bin/rack
+rm -f "target/bin/rack$EXE"
 rm -rf target/build
-RGC="$RGC_BIN" "$WORK/rack1" build
-cp target/bin/rack "$WORK/rack2"
+RGC="$RGC_BIN" "$WORK/rack1$EXE" build
+cp "target/bin/rack$EXE" "$WORK/rack2$EXE"
 
 echo "== stage 3: fixed-point check"
-if cmp -s "$WORK/rack1" "$WORK/rack2"; then
+if cmp -s "$WORK/rack1$EXE" "$WORK/rack2$EXE"; then
     echo "bootstrap OK: rack1 == rack2 (byte-identical fixed point)"
 else
     echo "bootstrap FAILED: rack1 != rack2"
     exit 1
 fi
-"$WORK/rack2" --version
-echo "binary: $REPO/target/bin/rack (same as a normal rack project; not committed)"
+"$WORK/rack2$EXE" --version
+echo "binary: $REPO/target/bin/rack$EXE (same as a normal rack project; not committed)"
