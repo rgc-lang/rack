@@ -12,6 +12,9 @@
 #
 # Assets:
 #   rack-<version>-<target>.tar.gz   rack binary, LICENSE, README
+#   rack-<version>-<target>[.exe]    raw bootstrap binary for install.sh/ps1
+#   rgc-<rgc-version>-windows-*.exe  native Windows installer, with an
+#                                    uninstaller that restores the machine PATH
 #   SHA256SUMS
 
 name: release
@@ -28,7 +31,7 @@ on:
       rgc_tag:
         description: RGC toolchain release used to build rack
         required: false
-        default: v0.0.3
+        default: v0.0.4
       platforms:
         description: Comma-separated platforms, or all
         required: false
@@ -43,7 +46,7 @@ concurrency:
 
 env:
   RGC_REPO: rgc-lang/rgc
-  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.3' }}
+  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.4' }}
 
 jobs:
   prepare:
@@ -51,6 +54,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      installer_matrix: ${{ steps.matrix.outputs.installer_matrix }}
+      installer_count: ${{ steps.matrix.outputs.installer_count }}
       version: ${{ steps.matrix.outputs.version }}
       tag: ${{ steps.matrix.outputs.tag }}
       rgc_version: ${{ steps.matrix.outputs.rgc_version }}
@@ -89,8 +94,8 @@ jobs:
               {"platform": "linux-arm64", "target": "aarch64-unknown-linux-gnu", "os": "linux", "arch": "arm64", "runner": "ubuntu-24.04-arm", "ext": "tar.gz"},
               {"platform": "macos-x64", "target": "x86_64-apple-darwin", "os": "macos", "arch": "x64", "runner": "macos-15-intel", "ext": "tar.gz"},
               {"platform": "macos-arm64", "target": "aarch64-apple-darwin", "os": "macos", "arch": "arm64", "runner": "macos-15", "ext": "tar.gz"},
-              {"platform": "windows-x64", "target": "x86_64-pc-windows-msvc", "os": "windows", "arch": "x64", "runner": "windows-latest", "ext": "zip"},
-              {"platform": "windows-arm64", "target": "aarch64-pc-windows-msvc", "os": "windows", "arch": "arm64", "runner": "windows-11-arm", "ext": "zip"},
+              {"platform": "windows-x64", "target": "x86_64-pc-windows-msvc", "os": "windows", "arch": "x64", "runner": "windows-latest", "ext": "tar.gz"},
+              {"platform": "windows-arm64", "target": "aarch64-pc-windows-msvc", "os": "windows", "arch": "arm64", "runner": "windows-11-arm", "ext": "tar.gz"},
           ]
           raw = os.environ["PLATFORMS"].strip()
           if raw == "all":
@@ -108,6 +113,11 @@ jobs:
           print("version=" + version)
           print("rgc_version=" + rgc_version)
           print("matrix=" + json.dumps({"include": selected}, separators=(",", ":")))
+          # Only Windows gets a native installer today; an empty matrix makes the
+          # installer job skip, which must not hold the archives hostage.
+          installers = [p for p in selected if p["os"] == "windows"]
+          print("installer_count=" + str(len(installers)))
+          print("installer_matrix=" + json.dumps({"include": installers}, separators=(",", ":")))
           PY
 
   test:
@@ -163,13 +173,7 @@ jobs:
             --pattern "$asset" --dir toolchain --clobber
           echo "RGC_ARCHIVE=$asset" >> "$GITHUB_ENV"
 
-      - name: Extract RGC compiler (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Expand-Archive -Path "toolchain/$env:RGC_ARCHIVE" -DestinationPath toolchain -Force
-
-      - name: Extract RGC compiler (Unix)
-        if: runner.os != 'Windows'
+      - name: Extract RGC compiler
         run: tar -xzf "toolchain/$RGC_ARCHIVE" -C toolchain
 
       - name: Set up the MSVC linker shim (Windows)
@@ -251,6 +255,9 @@ jobs:
           cp LICENSE README.md staging/
           tar -czf "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz" \
             -C staging "rack$EXE" LICENSE README.md
+          # Raw bootstrap consumed by install.sh/install.ps1; the download
+          # center manifest pins this exact name and checksum.
+          cp "target/bin/rack$EXE" "dist/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}$EXE"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -259,9 +266,89 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  installer:
+    name: installer (${{ matrix.platform }})
+    # Windows only today; a dispatch that selects no Windows platform must still
+    # publish the archives.
+    if: needs.prepare.outputs.installer_count != '0'
+    needs: [prepare, dist]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.installer_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download rack archive
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: input
+
+      - name: Download RGC compiler
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p toolchain
+          asset="rgc-${{ needs.prepare.outputs.rgc_version }}-${{ matrix.target }}.tar.gz"
+          gh release download "$RGC_TAG" --repo "$RGC_REPO" \
+            --pattern "$asset" --dir toolchain --clobber
+          echo "RGC_ARCHIVE=toolchain/$asset" >> "$GITHUB_ENV"
+
+      - name: Locate Inno Setup
+        run: |
+          set -euo pipefail
+          find_iscc() {
+            # The Windows images ship Inno Setup; look for it before installing
+            # anything so the job depends on no runner-image guarantee.
+            for candidate in "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+                             "/c/Program Files/Inno Setup 6/ISCC.exe"; do
+              if [ -f "$candidate" ]; then
+                echo "$candidate"
+                return 0
+              fi
+            done
+            return 1
+          }
+          if ! ISCC=$(find_iscc); then
+            choco install innosetup --no-progress -y
+            ISCC=$(find_iscc) || { echo "error: ISCC.exe not found" >&2; exit 1; }
+          fi
+          echo "ISCC=$ISCC" >> "$GITHUB_ENV"
+          echo "using $ISCC"
+
+      - name: Build installer
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python scripts/build-installers.py \
+            --version "${{ needs.prepare.outputs.rgc_version }}" \
+            --platform "${{ matrix.platform }}" \
+            --rgc-archive "$RGC_ARCHIVE" \
+            --rack-archive "input/rack-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz" \
+            --out dist \
+            --iscc "$ISCC"
+          ls -l dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: dist/*.exe
+          if-no-files-found: error
+
   publish:
     name: publish
-    needs: [prepare, test, dist]
+    needs: [prepare, test, dist, installer]
+    # `installer` skips when the matrix selects no Windows platform; a skipped
+    # installer job must not hold the archives hostage, a failed one must.
+    if: always() && needs.test.result == 'success' && needs.dist.result == 'success' && needs.installer.result != 'failure'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -270,6 +357,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download installer artifacts
+        if: needs.installer.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
           path: dist
           merge-multiple: true
 
@@ -294,7 +389,7 @@ jobs:
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          files=(rack-*)
+          files=(rack-* rgc-*.exe)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "error: no release assets" >&2
             exit 1
