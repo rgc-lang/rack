@@ -31,7 +31,7 @@ on:
       rgc_tag:
         description: RGC toolchain release used to build rack
         required: false
-        default: v0.0.4
+        default: v0.0.5
       platforms:
         description: Comma-separated platforms, or all
         required: false
@@ -46,7 +46,7 @@ concurrency:
 
 env:
   RGC_REPO: rgc-lang/rgc
-  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.4' }}
+  RGC_TAG: ${{ inputs.rgc_tag || 'v0.0.5' }}
 
 jobs:
   prepare:
