@@ -81,6 +81,13 @@ def main() -> int {
     if cmd == "publish" {
         return cmd_publish(".")
     }
+    if cmd == "fetch" {
+        if argv.len() < 3 {
+            print("error: rack fetch <scope>/<name>[@<version>]")
+            return 1
+        }
+        return cmd_fetch(argv.get(2))
+    }
     if cmd == "login" {
         # rack login                    → Device Flow：自动打开 /device 并轮询确认（§10）
         # rack login --code <code>      → fallback：/cli/login 页面的一次性 code 换 token

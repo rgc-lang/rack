@@ -470,3 +470,194 @@ public def reg_yank(name: str, version: str) -> str {
     }
     return reg_error_message(r.response.status, r.response.body)
 }
+
+# ---- 安装端：注册表包查询 / 下载（公开只读 API）----
+
+public class RegVersion {
+    version: str
+    cksum: str
+    format: str
+    yanked: bool
+}
+
+public class RegPackage {
+    ok: bool
+    error: str
+    versions: List[RegVersion]
+}
+
+def new_reg_package() -> RegPackage {
+    r = RegPackage()
+    r.ok = False
+    r.error = ""
+    r.versions = List[RegVersion]()
+    return r
+}
+
+# GET /api/v1/packages/{scope}/{name}：包信息 + 版本列表（含 cksum / publish_format）。
+public def reg_lookup(name: str) -> RegPackage {
+    out = new_reg_package()
+    url = reg_api_base() + "/api/v1/packages/" + name
+    headers = List[str]()
+    headers.push("Accept: application/json")
+    headers.push("User-Agent: rack/0.4 (RGC)")
+    r = http.request_with("GET", url, "", headers)
+    if not r.ok {
+        out.error = r.error
+        return out
+    }
+    if r.response.status != 200 {
+        out.error = reg_error_message(r.response.status, r.response.body)
+        return out
+    }
+    p = json.parse(r.response.body)
+    if not p.ok {
+        out.error = "invalid package response from " + url
+        return out
+    }
+    root = p.value
+    vs = json.get(@root, "versions")
+    n = json.len(@vs)
+    i = 0
+    while i < n {
+        item = json.at(@vs, i)
+        v = RegVersion()
+        v.version = json.as_str(json.get(@item, "version"))
+        v.cksum = json.as_str(json.get(@item, "cksum"))
+        v.format = json.as_str(json.get(@item, "publish_format"))
+        v.yanked = json.as_bool(json.get(@item, "yanked"))
+        out.versions.push(v)
+        i = i + 1
+    }
+    out.ok = True
+    return out
+}
+
+public class RegResolve {
+    ok: bool
+    error: str
+    version: str
+    cksum: str
+    format: str
+}
+
+def new_reg_resolve() -> RegResolve {
+    r = RegResolve()
+    r.ok = False
+    r.error = ""
+    r.version = ""
+    r.cksum = ""
+    r.format = ""
+    return r
+}
+
+# 解析包版本：`ver` 为空时取 semver 最新（跳过 yank）。
+public def reg_resolve(name: str, ver: str) -> RegResolve {
+    out = new_reg_resolve()
+    pkg = reg_lookup(name)
+    if not pkg.ok {
+        out.error = pkg.error
+        return out
+    }
+    best = ""
+    best_cksum = ""
+    best_format = ""
+    i = 0
+    while i < pkg.versions.len() {
+        v = pkg.versions.get(i)
+        if not v.yanked {
+            if ver.len() > 0 {
+                if v.version == ver {
+                    best = v.version
+                    best_cksum = v.cksum
+                    best_format = v.format
+                    break
+                }
+            } else {
+                if best == "" or util.version_compare(v.version, best) > 0 {
+                    best = v.version
+                    best_cksum = v.cksum
+                    best_format = v.format
+                }
+            }
+        }
+        i = i + 1
+    }
+    if best.len() == 0 {
+        if ver.len() > 0 {
+            out.error = "package `" + name + "@" + ver + "` not found in the registry"
+        } else {
+            out.error = "package `" + name + "` has no versions in the registry"
+        }
+        return out
+    }
+    out.ok = True
+    out.version = best
+    out.cksum = best_cksum
+    out.format = best_format
+    return out
+}
+
+public class RegDownload {
+    ok: bool
+    error: str
+    version: str
+    cksum: str
+    format: str
+    data: Bytes
+    manifest: str
+}
+
+def new_reg_download() -> RegDownload {
+    r = RegDownload()
+    r.ok = False
+    r.error = ""
+    r.version = ""
+    r.cksum = ""
+    r.format = ""
+    r.data = bytes.bytes_new(0)
+    r.manifest = ""
+    return r
+}
+
+# 下载包产物（tar.gz 归档或单 .rg）并取清单；校验和由调用方计算核对。
+# HTTP 客户端自动跟随 302（GitHub Releases 存储会重定向到 CDN）。
+public def reg_download(name: str, ver: str) -> RegDownload {
+    out = new_reg_download()
+    resolved = reg_resolve(name, ver)
+    if not resolved.ok {
+        out.error = resolved.error
+        return out
+    }
+    out.version = resolved.version
+    out.cksum = resolved.cksum
+    out.format = resolved.format
+
+    url = reg_api_base() + "/api/v1/packages/" + name + "/" + resolved.version + "/download"
+    headers = List[str]()
+    headers.push("Accept: application/octet-stream")
+    headers.push("User-Agent: rack/0.4 (RGC)")
+    r = http.request_with("GET", url, "", headers)
+    if not r.ok {
+        out.error = r.error
+        return out
+    }
+    if r.response.status != 200 {
+        out.error = reg_error_message(r.response.status, r.response.body)
+        return out
+    }
+    out.data = r.response.body_bytes
+
+    # 单文件包：清单在独立端点；归档包的清单在 tar.gz 内部。
+    if out.format != "archive" {
+        mheaders = List[str]()
+        mheaders.push("Accept: text/plain")
+        mheaders.push("User-Agent: rack/0.4 (RGC)")
+        m = http.request_with("GET", reg_api_base() + "/api/v1/packages/" + name + "/" + resolved.version + "/manifest", "", mheaders)
+        if m.ok and m.response.status == 200 {
+            out.manifest = m.response.body
+        }
+    }
+    out.ok = True
+    return out
+}

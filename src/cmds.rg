@@ -38,6 +38,7 @@ public def cmd_help() -> int {
     print("                         automatically after you confirm (fallback: `rack login --code <code>`)")
     print("  login --token <token>  save the web registry API token to ~/.rack/credentials.toml")
     print("  publish                publish <name>.rg and rack.toml to the web registry")
+    print("  fetch <pkg>[@ver]      download a web-registry package and extract it locally")
     print("  yank <pkg>@<ver>       yank a version from the web registry (needs login)")
     print("  logout                 remove the saved registry token")
     print("  search [--remote] [q]  search the local registry; --remote uses GitHub topic search")
@@ -633,6 +634,45 @@ public def cmd_yank(spec: str) -> int {
         return 1
     }
     print("  Yanked " + name + "@" + version)
+    return 0
+}
+
+# 从 web 注册表拉取包版本并解压到本地目录（多文件包/单文件包都支持）。
+# Usage: rack fetch <scope>/<name>[@<version>]
+public def cmd_fetch(spec: str) -> int {
+    name = util.split_head(spec, "@")
+    ver = ""
+    if spec.contains("@") {
+        ver = util.split_first(spec, "@")
+    }
+    if name.len() == 0 or not name.contains("/") {
+        print("error: rack fetch <scope>/<name>[@<version>]")
+        return 1
+    }
+    resolved = registry_api.reg_resolve(name, ver)
+    if not resolved.ok {
+        print("error: " + resolved.error)
+        return 1
+    }
+    base = name
+    slash = find_char_last(name, "/")
+    if slash >= 0 {
+        base = name.slice(slash + 1, name.len())
+    }
+    dest = base + "-" + resolved.version
+    r = fetch_registry_package(name, resolved.version, dest)
+    if r.is_err() {
+        msg = ""
+        match r {
+            case Err(e) => msg = e
+            case _ => msg = "cannot fetch " + name + "@" + resolved.version
+        }
+        print("error: " + msg)
+        return 1
+    }
+    print("  Fetched " + name + "@" + resolved.version + " (" + resolved.format + ")")
+    print("  Location: " + dest)
+    print("  Next: cd " + dest + " && rack build")
     return 0
 }
 

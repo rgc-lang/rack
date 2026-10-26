@@ -3,6 +3,12 @@ import lock
 import manifest
 import source
 import util
+import bytes
+import gzip
+import tar
+import registry_api
+import bin
+import sha2
 
 # registry.rg — package registry: local directory + GitHub-hosted source cache
 #
@@ -19,6 +25,11 @@ public def registry_dir() -> str {
 
 public def cache_dir() -> str {
     return path_join(detect_home(), ".rack/cache")
+}
+
+# web 注册表源标识：与 GitHub 源（github.com/...）并列。
+public def registry_source() -> str {
+    return "registry"
 }
 
 public class VersionLookup {
@@ -51,9 +62,19 @@ public def latest_version(name: str) -> str {
     return best
 }
 
-# Resolve the latest version by source: local registry or GitHub tags
+# Resolve the latest version by source: local registry, web registry or GitHub tags
 public def lookup_latest(name: str, src: str) -> VersionLookup {
     out = new_version_lookup()
+    if src == registry_source() {
+        resolved = registry_api.reg_resolve(name, "")
+        if not resolved.ok {
+            out.error = resolved.error
+            return out
+        }
+        out.ok = True
+        out.version = resolved.version
+        return out
+    }
     if src.len() == 0 {
         v = latest_version(name)
         if v.len() == 0 {
@@ -85,8 +106,11 @@ public def lookup_latest(name: str, src: str) -> VersionLookup {
     return out
 }
 
-# Package version directory: local registry or GitHub cache
+# Package version directory: local registry, web registry cache or GitHub cache
 public def pkg_dir(name: str, ver: str, src: str) -> str {
+    if src == registry_source() {
+        return cache_dir() + "/registry/" + name + "/" + ver
+    }
     if src.len() == 0 {
         return registry_dir() + "/" + name + "/" + ver
     }
@@ -102,7 +126,12 @@ public def pkg_module_path(name: str, ver: str, src: str) -> str {
     if d.len() == 0 {
         return ""
     }
-    return d + "/" + name + ".rg"
+    base = name
+    slash = find_char_last(name, "/")
+    if slash >= 0 {
+        base = name.slice(slash + 1, name.len())
+    }
+    return d + "/" + base + ".rg"
 }
 
 public def pkg_manifest_path(name: str, ver: str, src: str) -> str {
@@ -255,11 +284,193 @@ def ensure_cached(proj_dir: str, name: str, ver: str, src: str, enforce_lock: bo
     return Result[None, str].Ok(None)
 }
 
-# Install: copy <name>.rg from the registry/cache into target/deps/ (idempotent, repairs cache)
+# ---- web 注册表包：下载 / 校验 / 解压 ----
+
+def reg_strip_dot_slash(name: str) -> str {
+    out = name
+    while out.startswith("./") {
+        out = out.slice(2, out.len())
+    }
+    return out
+}
+
+def reg_archive_name_ok(name: str) -> bool {
+    if name.len() == 0 or name.startswith("/") {
+        return False
+    }
+    parts = name.split("/")
+    for part in parts {
+        if part == ".." {
+            return False
+        }
+    }
+    return True
+}
+
+def reg_write_entry(data: @Bytes, offset: int, size: int, dest: str) -> str {
+    if offset < 0 or size < 0 or offset + size > data.len {
+        return "truncated entry for " + dest
+    }
+    payload = data.slice(offset, offset + size)
+    w = bytes.write_bytes(dest, @payload)
+    if not w.ok {
+        return "cannot write " + dest + ": " + w.error
+    }
+    return ""
+}
+
+# 把内存中的 tar.gz 完整解压到 dest 目录（带路径安全校验）。
+def reg_extract_archive(data: @Bytes, dest: str) -> str {
+    gz = gzip.decompress(@data)
+    if not gz.ok {
+        return "cannot decompress archive: " + gz.error
+    }
+    tar_data = gz.data
+    listing = tar.list_entries(@tar_data)
+    if not listing.ok {
+        return "cannot read archive: " + listing.error
+    }
+    i = 0
+    while i < listing.entries.len() {
+        entry = listing.entries.get(i)
+        name = reg_strip_dot_slash(entry.name)
+        if not reg_archive_name_ok(name) {
+            return "unsafe path in archive: " + entry.name
+        }
+        if entry.kind == 5 {
+            if not util.mkdirs(dest + "/" + name) {
+                return "cannot create " + dest + "/" + name
+            }
+        } elif entry.kind == 0 {
+            dest_path = dest + "/" + name
+            parent = util.dir_name(dest_path)
+            if parent.len() > 0 and not util.mkdirs(parent) {
+                return "cannot create " + parent
+            }
+            err = reg_write_entry(@tar_data, entry.offset, entry.size, dest_path)
+            if err != "" {
+                return err
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+# 计算内存字节的 sha256（hex）。
+def reg_sha256_hex(data: @Bytes) -> str {
+    h = sha2.sha256(@data)
+    return bin.to_hex(@h)
+}
+
+# 从 web 注册表下载包版本，校验 sha256，解压/落盘到 dest_dir。
+# 归档包：完整源码树；单文件包：<name>.rg + rack.toml。
+# 返回错误串（空=成功）。
+public def fetch_registry_package(name: str, ver: str, dest_dir: str) -> Result[str, str] {
+    dl = registry_api.reg_download(name, ver)
+    if not dl.ok {
+        return Result[str, str].Err(dl.error)
+    }
+    d = dl.data
+    actual = reg_sha256_hex(@d)
+    if actual != dl.cksum {
+        return Result[str, str].Err("checksum mismatch for `" + name + "@" + dl.version + "`" +
+            "\n  expected: " + dl.cksum + "\n  actual:   " + actual)
+    }
+    if dl.format == "archive" {
+        err = reg_extract_archive(@d, dest_dir)
+        if err != "" {
+            return Result[str, str].Err(err)
+        }
+    } else {
+        if not util.mkdirs(dest_dir) {
+            return Result[str, str].Err("cannot create " + dest_dir)
+        }
+        mname = name
+        slash = find_char_last(name, "/")
+        if slash >= 0 {
+            mname = name.slice(slash + 1, name.len())
+        }
+        w = bytes.write_bytes(dest_dir + "/" + mname + ".rg", @d)
+        if not w.ok {
+            return Result[str, str].Err("cannot write " + mname + ".rg: " + w.error)
+        }
+        if dl.manifest.len() > 0 {
+            wm = write_file(dest_dir + "/rack.toml", dl.manifest)
+            if wm.is_err() {
+                return Result[str, str].Err("cannot write rack.toml")
+            }
+        }
+    }
+    # 记录校验和标记（离线缓存复用 / 锁文件校验用）。
+    wc = write_file(dest_dir + "/.cksum", dl.cksum)
+    if wc.is_err() {
+        return Result[str, str].Err("cannot write checksum marker")
+    }
+    return Result[str, str].Ok(dl.version)
+}
+
+# web 注册表源：确保缓存里有已校验的包内容（下载一次，后续离线复用）。
+# 缓存有效性用 `.cksum` 标记文件 + 锁文件校验和判断（与 GitHub 源的 manifest.checksum 同理）。
+def ensure_registry_cached(proj_dir: str, name: str, ver: str, enforce_lock: bool) -> Result[None, str] {
+    dir = pkg_dir(name, ver, registry_source())
+    expected = ""
+    if enforce_lock {
+        expected = locked_checksum(proj_dir, name, ver, registry_source())
+    }
+    marker = dir + "/.cksum"
+    if expected.len() > 0 and read_file_or(marker) == expected {
+        return Result[None, str].Ok(None)
+    }
+    tmp = dir + ".tmp"
+    remove_dir_all(tmp)
+    if not mkdirs(tmp) {
+        return Result[None, str].Err("cannot create cache directory " + tmp)
+    }
+    r = fetch_registry_package(name, ver, tmp)
+    if r.is_err() {
+        msg = "cannot fetch " + name + "@" + ver + " from the registry"
+        match r {
+            case Err(e) => msg = e
+            case _ => msg = "cannot fetch " + name + "@" + ver + " from the registry"
+        }
+        remove_dir_all(tmp)
+        return Result[None, str].Err(msg)
+    }
+    actual = read_file_or(tmp + "/.cksum")
+    if expected.len() > 0 and actual != expected {
+        remove_dir_all(tmp)
+        return Result[None, str].Err(checksum_mismatch_msg(name, ver, registry_source(), expected, actual))
+    }
+    remove_dir_all(dir)
+    if not move_path(tmp, dir) {
+        remove_dir_all(tmp)
+        return Result[None, str].Err("cannot commit cache directory " + dir)
+    }
+    return Result[None, str].Ok(None)
+}
 # Local packages are verified against the registry manifest checksum; GitHub packages are re-fetched when missing/corrupt.
 # With enforce_lock set, remote package content must match the checksum recorded in rack.lock.
 public def install_pkg(proj_dir: str, name: str, ver: str, src: str, enforce_lock: bool) -> Result[str, str] {
-    if src.len() > 0 {
+    if src == registry_source() {
+        cached = ensure_registry_cached(proj_dir, name, ver, enforce_lock)
+        if cached.is_err() {
+            msg = "cannot fetch " + name + "@" + ver + " from the registry"
+            match cached {
+                case Err(e) => msg = e
+                case _ => msg = "cannot fetch " + name + "@" + ver + " from the registry"
+            }
+            return Result[str, str].Err(msg)
+        }
+        # 多文件归档包是完整项目源码树（rack 本身），不是单 `.rg` 依赖；
+        # 用 `rack fetch <pkg>@<ver>` 拉取后在其目录里直接 `rack build`。
+        dir = pkg_dir(name, ver, registry_source())
+        if try_read(pkg_module_path(name, ver, registry_source())).is_err() {
+            return Result[str, str].Err(
+                "package `" + name + "@" + ver + "` is a multi-file archive (use `rack fetch " +
+                name + "@" + ver + "` to download and build it)")
+        }
+    } elif src.len() > 0 {
         cached = ensure_cached(proj_dir, name, ver, src, enforce_lock)
         if cached.is_err() {
             msg = "cannot fetch " + name + "@" + ver
