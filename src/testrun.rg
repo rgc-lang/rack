@@ -298,7 +298,7 @@ def tr_negative(r: @var TestRun, src: str, label: str) {
         r.fail_n = r.fail_n + 1
         return
     }
-    if not tr_read(log).contains("error:") {
+    if not (tr_read(log).contains("error[") or tr_read(log).contains("error:")) {
         print("FAIL " + label + " missing error: diagnostic")
         r.fail_n = r.fail_n + 1
         return
