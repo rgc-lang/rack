@@ -190,6 +190,11 @@ jobs:
           if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
             throw "cl.exe not found after vcvarsall $arch"
           }
+          # Later steps (and cl.exe under g++.cmd) need the vcvars environment.
+          foreach ($name in @("PATH", "INCLUDE", "LIB", "LIBPATH")) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+          }
 
           # rgc links by invoking `g++ <obj> -o <out> -lws2_32 -lbcrypt`; translate
           # that to cl.exe with the static CRT and a reproducible PE timestamp.
